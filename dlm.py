@@ -54,15 +54,18 @@ def KalmanFilter(dataset, m0, C0, Ft, Gt, V, W):
     return m_all, C_all, a_all, R_all
 
 
-def KalmanFilter_SVD(dataset, m0, C0, Ft, Gt, V, W):
+def KalmanFilter_SVD(dataset, m0, Ch_C0, Ft, Gt, Ch_invV, Ch_invW):
     """ Compute Kalman filter on dataset 
     starting with initial distribution N(m0, C0).
     Inputs:
         dataset = np.array containing data -- (time steps) x (observations)
         m0 = mean of initial state
-        C0 = covariance matrix of initial state
+        Ch_C0 = [U,S] for covariance matrix of initial state
         Ft, Gt = list of matrices defining the DLM
-        V, W = covariance matrices for observation and model
+        Ch_invV = Cholesky factor of the inverse of V, i.e., [U, S] such that
+            V^{-1} = U.S.U^T
+        Ch_invV = same as for invV but with W
+        (V, W = covariance matrices for observation and model)
     Outputs:
         m_all = means of state estimate (theta_t | y_{1:t})
         C_all = covariance matrices of state estimate
@@ -72,11 +75,12 @@ def KalmanFilter_SVD(dataset, m0, C0, Ft, Gt, V, W):
     nbobs = dataset.size/timesteps
     param = m0.size
     m = m0.reshape((param, 1))
-    U,S,Vt = svd(C0)
-    C = [U,np.sqrt(S)]
-    a,s,b = svd(W)
-    Gam = a.dot(np.diag(np.sqrt(s)))
-    S = cholesky(np.linalg.inv(V))
+#    U,S,Vt = svd(C0)
+#    C = [U,np.sqrt(S)]
+    C = [Ch_C0[0], np.sqrt(Ch_C0[1])]
+    Gam = Ch_invW[0].dot(np.diag(1/np.sqrt(Ch_invW[1])))
+    invV_ch = Ch_invV[0].dot(np.diag(np.sqrt(Ch_invV[1])))
+    V = Ch_invV[0].dot(np.diag(1/Ch_invV[1])).dot(Ch_invV[0].T)
     m_all = np.zeros((timesteps, param))
     a_all = np.zeros((timesteps, param))
     C_all, R_all = [], []
@@ -98,7 +102,7 @@ def KalmanFilter_SVD(dataset, m0, C0, Ft, Gt, V, W):
         # State estimate: m, C
         m = a + U.dot(np.diag(D**2).dot(UT)).dot(F.T).dot(Qinve)
         m_all[ii,:] = m.T
-        tmp = (S.T).dot(F.dot(U))
+        tmp = (invV_ch.T).dot(F.dot(U))
         Delta, tDinv, MT = svd(np.concatenate((tmp, np.diag(1/D)), axis=0))
         M = MT.T
         C = [U.dot(M), 1/tDinv]
@@ -136,22 +140,19 @@ def KalmanSmoother(sT, ST, Gt, m_all, C_all, a_all, R_all):
     return s_all, S_all[::-1]
 
 
-def BackwardSampling_SVD(Gt, W, m_all, C_all, a_all, R_all):
+def BackwardSampling_SVD(Gt, Ch_invW, m_all, C_all, a_all, R_all):
     """ Sample from the joint distribution (theta_{1:T} | y_{1:T})
     Inputs:
         Gt = list of matrices containing definition of DLM
-        W = covariance matrix for evolution equation
+        Ch_invW = [U, S] such that U.S.U^T = W^{-1}
+        (W = covariance matrix for evolution equation)
         m_all, C_all, a_all, R_all = output from KalmanFilter_SVD
     Outputs:
         thetas = joint draw from (theta_{1:T} | y_{1:T}) 
         maxVarB = maximum variance in B at each time step (diagonal only) """
     timesteps, parameters = m_all.shape
     thetas = np.zeros(m_all.shape)
-    UW, SW, UTW = svd(W)
-    invsqrtSW = np.zeros(SW.shape)
-    indices = SW.nonzero()[0]
-    invsqrtSW[indices] = 1/np.sqrt(SW[indices])
-    invGam = UW.dot(np.diag(invsqrtSW))
+    invGam = Ch_invW[0].dot(np.diag(Ch_invW[1]))
     # Sample at time t=T
     h = m_all[timesteps-1,:].reshape((parameters,1))
     C = C_all[-1]
@@ -198,7 +199,7 @@ def BackwardSampling_SVD(Gt, W, m_all, C_all, a_all, R_all):
     return thetas, maxVarB
 
 
-def FFBS(dataset, m0, C0, Ft, Gt, V, W):
+def FFBS(dataset, m0, Cholesky_C0, Ft, Gt, Cholesky_invV, Cholesky_invW):
     """ Sample from the joint distribution (theta_{1:T} | y_{1:T}) given
     covariance matrices V and W using the Forward Filtering Backward Sampling
     (FFBS) algorithm
@@ -207,12 +208,15 @@ def FFBS(dataset, m0, C0, Ft, Gt, V, W):
         m0 = mean of initial state
         C0 = covariance matrix of initial state
         Ft, Gt = list of matrices defining the DLM
-        V, W = covariance matrices for observation and model
+        Cholesky_invV = Cholesky factor of the inverse of V, i.e., [U, S] such that
+            V^{-1} = U.S.U^T
+        Cholesky_invV = same as for invV but with W
+        (V, W = covariance matrices for observation and model)
     Outputs:
         thetas = joint draw from (theta_{1:T} | y_{1:T}) 
         maxVarB = maximum variance in B at each time step (diagonal only) """
-    m, C, a, R = KalmanFilter_SVD(dataset, m0, C0, Ft, Gt, V, W)
-    return BackwardSampling_SVD(Gt, W, m, C, a, R)
+    m, C, a, R = KalmanFilter_SVD(dataset, m0, Cholesky_C0, Ft, Gt, Cholesky_invV, Cholesky_invW)
+    return BackwardSampling_SVD(Gt, Cholesky_invW, m, C, a, R)
     
 
 
