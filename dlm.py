@@ -54,17 +54,17 @@ def KalmanFilter(dataset, m0, C0, Ft, Gt, V, W):
     return m_all, C_all, a_all, R_all
 
 
-def KalmanFilter_SVD(dataset, m0, Ch_C0, Ft, Gt, Ch_invV, Ch_invW):
+def KalmanFilter_SVD(dataset, m0, svd_C0, Ft, Gt, svd_invV, svd_invW):
     """ Compute Kalman filter on dataset 
     starting with initial distribution N(m0, C0).
     Inputs:
         dataset = np.array containing data -- (time steps) x (observations)
         m0 = mean of initial state
-        Ch_C0 = [U,S] for covariance matrix of initial state
+        svd_C0 = [U,S] for covariance matrix of initial state
         Ft, Gt = list of matrices defining the DLM
-        Ch_invV = Cholesky factor of the inverse of V, i.e., [U, S] such that
+        svd_invV = SVD factors of the inverse of V, i.e., [U, S] such that
             V^{-1} = U.S.U^T
-        Ch_invV = same as for invV but with W
+        svd_invV = same as for invV but with W
         (V, W = covariance matrices for observation and model)
     Outputs:
         m_all = means of state estimate (theta_t | y_{1:t})
@@ -75,12 +75,10 @@ def KalmanFilter_SVD(dataset, m0, Ch_C0, Ft, Gt, Ch_invV, Ch_invW):
     nbobs = dataset.size/timesteps
     param = m0.size
     m = m0.reshape((param, 1))
-#    U,S,Vt = svd(C0)
-#    C = [U,np.sqrt(S)]
-    C = [Ch_C0[0], np.sqrt(Ch_C0[1])]
-    Gam = Ch_invW[0].dot(np.diag(1/np.sqrt(Ch_invW[1])))
-    invV_ch = Ch_invV[0].dot(np.diag(np.sqrt(Ch_invV[1])))
-    V = Ch_invV[0].dot(np.diag(1/Ch_invV[1])).dot(Ch_invV[0].T)
+    C = [svd_C0[0], np.sqrt(svd_C0[1])]
+    Gam = svd_invW[0].dot(np.diag(1/np.sqrt(svd_invW[1])))
+    invV_ch = svd_invV[0].dot(np.diag(np.sqrt(svd_invV[1])))
+    V = svd_invV[0].dot(np.diag(1/svd_invV[1])).dot(svd_invV[0].T)
     m_all = np.zeros((timesteps, param))
     a_all = np.zeros((timesteps, param))
     C_all, R_all = [], []
@@ -140,19 +138,20 @@ def KalmanSmoother(sT, ST, Gt, m_all, C_all, a_all, R_all):
     return s_all, S_all[::-1]
 
 
-def BackwardSampling_SVD(Gt, Ch_invW, m_all, C_all, a_all, R_all):
-    """ Sample from the joint distribution (theta_{1:T} | y_{1:T})
+def BackwardSampling_SVD(Gt, svd_invW, m0, m_all, svd_C0, C_all, a_all, R_all):
+    """ Sample from the joint distribution (theta_{0:T} | y_{1:T})
     Inputs:
         Gt = list of matrices containing definition of DLM
-        Ch_invW = [U, S] such that U.S.U^T = W^{-1}
+        svd_invW = [U, S] such that U.S.U^T = W^{-1}
         (W = covariance matrix for evolution equation)
+        m0, C0 = parameters of initial distribution
         m_all, C_all, a_all, R_all = output from KalmanFilter_SVD
     Outputs:
-        thetas = joint draw from (theta_{1:T} | y_{1:T}) 
+        thetas = joint draw from (theta_{0:T} | y_{1:T}) 
         maxVarB = maximum variance in B at each time step (diagonal only) """
     timesteps, parameters = m_all.shape
-    thetas = np.zeros(m_all.shape)
-    invGam = Ch_invW[0].dot(np.diag(Ch_invW[1]))
+    thetas = np.zeros((timesteps+1, parameters))
+    invGam = svd_invW[0].dot(np.diag(np.sqrt(svd_invW[1])))
     # Sample at time t=T
     h = m_all[timesteps-1,:].reshape((parameters,1))
     C = C_all[-1]
@@ -170,6 +169,21 @@ def BackwardSampling_SVD(Gt, Ch_invW, m_all, C_all, a_all, R_all):
     ii = timesteps - 2
     for G, Rsvd in zip(reversed(Gt), reversed(R_all)):
         a = a_all[ii+1,:].reshape((parameters,1))
+        if ii < 0: 
+            m = m0.reshape((parameters,1))
+            C = svd_C0[0].dot(np.diag(svd_C0[1])).dot(svd_C0[0].T)
+            invR = Rsvd[0].dot(np.diag(1/Rsvd[1]**2)).dot(Rsvd[0].T)
+            CGinvR = C.dot(G.T).dot(invR)
+            h = m + CGinvR.dot(theta - a)
+            tmp = (invGam.T).dot(G).dot(svd_C0[0])
+            A, invD, ET = svd(np.concatenate((tmp, \
+            np.diag(1/np.sqrt(svd_C0[1]))), axis=0))
+            U = svd_C0[0].dot(ET.T)
+            B_ch = U.dot(np.diag(1/invD))
+            theta = SampleMultivariateNormal(h, B_ch)
+            thetas[ii+1,:] = theta.reshape((1, parameters))
+            maxVarB.append(np.abs(np.diag(B_ch.dot(B_ch.T))).max())
+            break
         m = m_all[ii,:].reshape((parameters,1))
         Csvd = C_all[ii]
         C = Csvd[0].dot(np.diag(Csvd[1]**2)).dot(Csvd[0].T)
@@ -181,7 +195,7 @@ def BackwardSampling_SVD(Gt, Ch_invW, m_all, C_all, a_all, R_all):
         U = Csvd[0].dot(ET.T)
         B_ch = U.dot(np.diag(1/invD))
         theta = SampleMultivariateNormal(h, B_ch)
-        thetas[ii,:] = theta.reshape((1, parameters))
+        thetas[ii+1,:] = theta.reshape((1, parameters))
         maxVarB.append(np.abs(np.diag(B_ch.dot(B_ch.T))).max())
         # To check, compute st
 #        s = m + CGinvR.dot(s - a)
@@ -195,18 +209,17 @@ def BackwardSampling_SVD(Gt, Ch_invW, m_all, C_all, a_all, R_all):
 #        Sfull = C - CGinvR.dot(Rfull-Sfull).dot(CGinvR.T)
 #        S_all.append(Sfull)
         ii -= 1
-        if ii < 0: break
     return thetas, maxVarB
 
 
-def FFBS(dataset, m0, Cholesky_C0, Ft, Gt, Cholesky_invV, Cholesky_invW):
+def FFBS(dataset, m0, svd_C0, Ft, Gt, svd_invV, svd_invW):
     """ Sample from the joint distribution (theta_{1:T} | y_{1:T}) given
     covariance matrices V and W using the Forward Filtering Backward Sampling
     (FFBS) algorithm
     Inputs:
         dataset = np.array containing data -- (time steps) x (observations)
         m0 = mean of initial state
-        C0 = covariance matrix of initial state
+        svd_C0 = [U,S] for covariance matrix of initial state
         Ft, Gt = list of matrices defining the DLM
         Cholesky_invV = Cholesky factor of the inverse of V, i.e., [U, S] such that
             V^{-1} = U.S.U^T
@@ -215,8 +228,8 @@ def FFBS(dataset, m0, Cholesky_C0, Ft, Gt, Cholesky_invV, Cholesky_invW):
     Outputs:
         thetas = joint draw from (theta_{1:T} | y_{1:T}) 
         maxVarB = maximum variance in B at each time step (diagonal only) """
-    m, C, a, R = KalmanFilter_SVD(dataset, m0, Cholesky_C0, Ft, Gt, Cholesky_invV, Cholesky_invW)
-    return BackwardSampling_SVD(Gt, Cholesky_invW, m, C, a, R)
+    m, C, a, R = KalmanFilter_SVD(dataset, m0, svd_C0, Ft, Gt, svd_invV, svd_invW)
+    return BackwardSampling_SVD(Gt, svd_invW, m0, m, svd_C0, C, a, R)
     
 
 
